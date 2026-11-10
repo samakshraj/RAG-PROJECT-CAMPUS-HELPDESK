@@ -1,12 +1,20 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { UserRound, Save, LockKeyhole } from "lucide-react";
+import { UserRound, Save, LockKeyhole, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScreenHeading } from "@/components/screen-heading";
 import { SignInPrompt, useStudentAccount } from "@/components/student-account";
 import { pageHead, profileOptions } from "@/lib/student-data";
 import { api } from "@/lib/api";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 export const Route = createFileRoute("/profile")({
   head: () => pageHead("My profile", "Manage your student details and update your password."),
@@ -14,13 +22,15 @@ export const Route = createFileRoute("/profile")({
 });
 
 function Profile() {
-  const { user, profileId } = useStudentAccount();
+  const { user, profileId, signOut } = useStudentAccount();
   const client = useQueryClient();
   const query = useQuery({ ...profileOptions(profileId ?? ""), enabled: Boolean(profileId) });
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletionConfirmation, setDeletionConfirmation] = useState("");
 
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -45,6 +55,25 @@ function Profile() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not save profile.");
     } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteAccount() {
+    if (deletionConfirmation !== "DELETE MY ACCOUNT") {
+      setMessage("Type DELETE MY ACCOUNT to confirm.");
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    try {
+      await api("/account", {
+        method: "DELETE",
+        body: JSON.stringify({ confirmation: deletionConfirmation }),
+      });
+      await signOut();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not delete your account.");
       setBusy(false);
     }
   }
@@ -169,6 +198,24 @@ function Profile() {
               </div>
             </form>
           </section>
+          <section className="mt-10 border-t border-destructive/30 pt-7">
+            <h2 className="font-bold text-destructive">Delete account</h2>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Permanently delete your sign-in, profile, tickets, reminders, and chat history.
+            </p>
+            <Button
+              className="mt-4"
+              variant="destructive"
+              disabled={busy}
+              onClick={() => {
+                setDeletionConfirmation("");
+                setDeleteOpen(true);
+              }}
+            >
+              <Trash2 />
+              Delete my account
+            </Button>
+          </section>
         </div>
       )}
       {message && (
@@ -176,6 +223,33 @@ function Profile() {
           {message}
         </p>
       )}
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent className="max-w-md bg-card">
+          <DialogHeader>
+            <DialogTitle>Delete your account?</DialogTitle>
+            <DialogDescription>
+              This cannot be undone. Type <strong>DELETE MY ACCOUNT</strong> to continue.
+            </DialogDescription>
+          </DialogHeader>
+          <label className="field-label">
+            Confirmation
+            <input
+              className="student-input"
+              value={deletionConfirmation}
+              onChange={(event) => setDeletionConfirmation(event.target.value)}
+              autoComplete="off"
+            />
+          </label>
+          <DialogFooter>
+            <Button variant="outline" disabled={busy} onClick={() => setDeleteOpen(false)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" disabled={busy} onClick={deleteAccount}>
+              {busy ? "Deleting…" : "Permanently delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

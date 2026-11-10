@@ -5,10 +5,14 @@ import json
 import hashlib
 import secrets
 import sqlite3
+import smtplib
 import threading
 import uuid
 from io import BytesIO
 from datetime import datetime, timezone
+from email.message import EmailMessage
+from email.utils import formataddr
+from html import escape
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -91,6 +95,7 @@ CREATE TABLE IF NOT EXISTS reminders (
     title TEXT NOT NULL,
     due_at TEXT NOT NULL,
     completed INTEGER NOT NULL DEFAULT 0,
+    email_sent_at TEXT,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS reminders_owner_due ON reminders(user_id, due_at);
@@ -152,6 +157,7 @@ def database():
         connection.executescript(SCHEMA)
         ensure_document_columns(connection)
         ensure_chat_history_columns(connection)
+        ensure_reminder_columns(connection)
         yield connection
     except sqlite3.Error as exc:
         raise HTTPException(status_code=503, detail="Could not open the SQLite database. Check SQLITE_DATABASE_PATH and file permissions.") from exc
@@ -171,6 +177,11 @@ def ensure_chat_history_columns(connection: sqlite3.Connection) -> None:
     if "session_id" not in columns:
         connection.execute("ALTER TABLE chat_history ADD COLUMN session_id TEXT NOT NULL DEFAULT 'legacy'")
     connection.execute("CREATE INDEX IF NOT EXISTS chat_history_owner_session ON chat_history(user_id, session_id, created_at)")
+
+def ensure_reminder_columns(connection: sqlite3.Connection) -> None:
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(reminders)").fetchall()}
+    if "email_sent_at" not in columns:
+        connection.execute("ALTER TABLE reminders ADD COLUMN email_sent_at TEXT")
 
 def current_user(authorization: str | None = Header(default=None)):
     if not authorization or not authorization.startswith("Bearer "):
@@ -214,6 +225,12 @@ class TicketInput(BaseModel):
     category: str = Field(default="General", max_length=80)
     description: str = Field(min_length=1, max_length=5000)
 
+class TicketUpdateInput(BaseModel):
+    kind: str | None = Field(default=None, pattern="^(Complaint|Request)$")
+    subject: str | None = Field(default=None, max_length=160)
+    category: str | None = Field(default=None, max_length=80)
+    description: str | None = Field(default=None, max_length=5000)
+
 class ProfileInput(BaseModel):
     full_name: str = Field(default="", max_length=120)
     student_id: str = Field(default="", max_length=120)
@@ -225,6 +242,14 @@ class ProfileInput(BaseModel):
 class ReminderInput(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     due_at: str
+
+class ReminderUpdateInput(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+    due_at: str | None = None
+    completed: bool | None = None
+
+class AccountDeletionInput(BaseModel):
+    confirmation: str = Field(max_length=80)
 
 class NoticeInput(BaseModel):
     title: str = Field(min_length=1, max_length=200)
@@ -370,6 +395,24 @@ def update_own_password(payload: PasswordResetInput, user=Depends(current_user))
         raise HTTPException(status_code=400, detail=f"Could not update password: {exc}") from exc
     return {"ok": True}
 
+@app.delete("/account")
+def delete_own_account(payload: AccountDeletionInput, user=Depends(current_user), db=Depends(database)):
+    if payload.confirmation != "DELETE MY ACCOUNT":
+        raise HTTPException(422, "Type DELETE MY ACCOUNT to confirm account deletion")
+    if is_admin(user["uid"], db):
+        raise HTTPException(409, detail="Administrator accounts cannot be deleted from the student dashboard.")
+    ensure_firebase_admin()
+    try:
+        firebase_auth.delete_user(user["uid"])
+    except Exception as exc:
+        if exc.__class__.__name__ != "UserNotFoundError":
+            raise HTTPException(status_code=400, detail=f"Could not delete account: {exc}") from exc
+    for table in ("profiles", "reminders", "tickets", "chat_history", "auth_handoffs"):
+        column = "firebase_uid" if table == "profiles" else "uid" if table == "auth_handoffs" else "user_id"
+        db.execute(f"DELETE FROM {table} WHERE {column} = ?", (user["uid"],))
+    db.commit()
+    return {"ok": True}
+
 @app.get("/admin/users")
 def list_managed_users(_=Depends(admin_user), db=Depends(database)):
     rows = db.execute(
@@ -508,6 +551,39 @@ def create_ticket(payload: TicketInput, user=Depends(current_user), db=Depends(d
     db.commit()
     return serialize(db.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone())
 
+@app.patch("/tickets/{ticket_id}")
+def update_ticket(ticket_id: str, payload: TicketUpdateInput, user=Depends(current_user), db=Depends(database)):
+    updates: list[str] = []
+    values: list[object] = []
+    for field in ("kind", "subject", "category", "description"):
+        value = getattr(payload, field)
+        if value is None:
+            continue
+        cleaned = value.strip()
+        if not cleaned:
+            raise HTTPException(422, f"Ticket {field} cannot be empty")
+        updates.append(f"{field} = ?")
+        values.append(cleaned)
+    if not updates:
+        raise HTTPException(422, "No valid ticket fields supplied")
+    values.extend([ticket_id, user["uid"]])
+    result = db.execute(
+        f"UPDATE tickets SET {', '.join(updates)} WHERE id = ? AND user_id = ?",
+        values,
+    )
+    db.commit()
+    if result.rowcount == 0:
+        raise HTTPException(404, "Ticket not found")
+    return serialize(db.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone())
+
+@app.delete("/tickets/{ticket_id}")
+def delete_ticket(ticket_id: str, user=Depends(current_user), db=Depends(database)):
+    result = db.execute("DELETE FROM tickets WHERE id = ? AND user_id = ?", (ticket_id, user["uid"]))
+    db.commit()
+    if result.rowcount == 0:
+        raise HTTPException(404, "Ticket not found")
+    return {"ok": True}
+
 @app.get("/admin/tickets")
 def admin_list_tickets(_=Depends(admin_user), db=Depends(database)):
     return [serialize(item) for item in db.execute("SELECT * FROM tickets ORDER BY created_at DESC").fetchall()]
@@ -614,19 +690,42 @@ def list_reminders(user=Depends(current_user), db=Depends(database)):
 @app.post("/reminders")
 def create_reminder(payload: ReminderInput, user=Depends(current_user), db=Depends(database)):
     reminder_id = new_id()
+    due_at = parse_reminder_time(payload.due_at)
     db.execute(
         "INSERT INTO reminders (id, user_id, title, due_at, completed, created_at) VALUES (?, ?, ?, ?, 0, ?)",
-        (reminder_id, user["uid"], payload.title, payload.due_at, timestamp()),
+        (reminder_id, user["uid"], payload.title.strip(), due_at.isoformat(), timestamp()),
     )
     db.commit()
     return serialize(db.execute("SELECT * FROM reminders WHERE id = ?", (reminder_id,)).fetchone(), ("completed",))
 
 @app.patch("/reminders/{reminder_id}")
-def update_reminder(reminder_id: str, payload: dict, user=Depends(current_user), db=Depends(database)):
-    changes = {key: value for key, value in payload.items() if key in {"completed"}}
-    if not changes:
+def update_reminder(reminder_id: str, payload: ReminderUpdateInput, user=Depends(current_user), db=Depends(database)):
+    updates: list[str] = []
+    values: list[object] = []
+    schedule_changed = False
+    if payload.title is not None:
+        title = payload.title.strip()
+        if not title:
+            raise HTTPException(422, "Reminder title cannot be empty")
+        updates.append("title = ?")
+        values.append(title)
+        schedule_changed = True
+    if payload.due_at is not None:
+        updates.append("due_at = ?")
+        values.append(parse_reminder_time(payload.due_at).isoformat())
+        schedule_changed = True
+    if payload.completed is not None:
+        updates.append("completed = ?")
+        values.append(int(payload.completed))
+    if not updates:
         raise HTTPException(422, "No valid reminder fields supplied")
-    result = db.execute("UPDATE reminders SET completed = ? WHERE id = ? AND user_id = ?", (int(bool(changes["completed"])), reminder_id, user["uid"]))
+    if schedule_changed:
+        updates.append("email_sent_at = NULL")
+    values.extend([reminder_id, user["uid"]])
+    result = db.execute(
+        f"UPDATE reminders SET {', '.join(updates)} WHERE id = ? AND user_id = ?",
+        values,
+    )
     db.commit()
     if result.rowcount == 0: raise HTTPException(404, "Reminder not found")
     return {"ok": True}
@@ -638,6 +737,15 @@ def delete_reminder(reminder_id: str, user=Depends(current_user), db=Depends(dat
     if result.rowcount == 0:
         raise HTTPException(404, "Reminder not found")
     return {"ok": True}
+
+def parse_reminder_time(value: str) -> datetime:
+    try:
+        due_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(422, "Reminder date and time is invalid") from exc
+    if due_at.tzinfo is None:
+        raise HTTPException(422, "Reminder date and time must include a timezone")
+    return due_at.astimezone(timezone.utc)
 
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
@@ -777,6 +885,102 @@ def initialize_knowledge_base() -> None:
     global startup_error
     startup_error = "The campus knowledge base is loading."
     schedule_knowledge_base_rebuild()
+    start_reminder_email_worker()
+
+
+reminder_email_thread: threading.Thread | None = None
+reminder_email_stop = threading.Event()
+
+
+def smtp_is_configured() -> bool:
+    return all(os.getenv(name) for name in ("SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM"))
+
+
+def send_reminder_email(recipient: str, title: str, due_at: str) -> None:
+    host = os.getenv("SMTP_HOST", "")
+    port = int(os.getenv("SMTP_PORT", "587"))
+    sender = os.getenv("SMTP_FROM", "")
+    sender_name = os.getenv("SMTP_FROM_NAME", "Campus Helpdesk")
+    message = EmailMessage()
+    message["Subject"] = f"Reminder: {title}"
+    message["From"] = formataddr((sender_name, sender))
+    message["To"] = recipient
+    message.set_content(
+        f"This is a reminder from Campus Helpdesk.\n\n{title}\nDue: {due_at}\n\n"
+        "You can mark it complete from the Reminders page."
+    )
+    message.add_alternative(
+        f"<p>This is a reminder from <strong>Campus Helpdesk</strong>.</p>"
+        f"<p><strong>{escape(title)}</strong><br>Due: {escape(due_at)}</p>"
+        "<p>You can mark it complete from the Reminders page.</p>",
+        subtype="html",
+    )
+    with smtplib.SMTP(host, port, timeout=20) as smtp:
+        smtp.ehlo()
+        if os.getenv("SMTP_USE_TLS", "true").lower() not in {"0", "false", "no"}:
+            smtp.starttls()
+            smtp.ehlo()
+        smtp.login(os.environ["SMTP_USERNAME"], os.environ["SMTP_PASSWORD"])
+        smtp.send_message(message)
+
+
+def send_due_reminder_emails() -> None:
+    """Deliver each due, incomplete reminder once after its scheduled time."""
+    if not smtp_is_configured():
+        return
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(DATABASE_PATH, timeout=10)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.executescript(SCHEMA)
+        ensure_reminder_columns(connection)
+        due_reminders = connection.execute(
+            "SELECT reminders.id, reminders.title, reminders.due_at, profiles.email "
+            "FROM reminders JOIN profiles ON profiles.firebase_uid = reminders.user_id "
+            "WHERE reminders.completed = 0 AND reminders.email_sent_at IS NULL "
+            "AND reminders.due_at <= ? AND trim(profiles.email) != ''",
+            (timestamp(),),
+        ).fetchall()
+        for reminder in due_reminders:
+            try:
+                send_reminder_email(reminder["email"], reminder["title"], reminder["due_at"])
+            except (OSError, smtplib.SMTPException, ValueError) as exc:
+                print(f"Could not send reminder email for {reminder['id']}: {exc}")
+                continue
+            connection.execute(
+                "UPDATE reminders SET email_sent_at = ? WHERE id = ? AND email_sent_at IS NULL",
+                (timestamp(), reminder["id"]),
+            )
+            connection.commit()
+    finally:
+        connection.close()
+
+
+def reminder_email_worker() -> None:
+    interval = max(15, int(os.getenv("REMINDER_CHECK_INTERVAL_SECONDS", "60")))
+    while not reminder_email_stop.is_set():
+        try:
+            send_due_reminder_emails()
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            print(f"Reminder email worker error: {exc}")
+        reminder_email_stop.wait(interval)
+
+
+def start_reminder_email_worker() -> None:
+    global reminder_email_thread
+    if reminder_email_thread is None or not reminder_email_thread.is_alive():
+        reminder_email_stop.clear()
+        reminder_email_thread = threading.Thread(
+            target=reminder_email_worker,
+            name="campus-reminder-emails",
+            daemon=True,
+        )
+        reminder_email_thread.start()
+
+
+@app.on_event("shutdown")
+def stop_reminder_email_worker() -> None:
+    reminder_email_stop.set()
 
 
 def rebuild_knowledge_base_worker() -> None:

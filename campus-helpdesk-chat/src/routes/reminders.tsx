@@ -1,11 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { CalendarClock, Plus, Trash2, Check, Circle } from "lucide-react";
+import { CalendarClock, Plus, Trash2, Check, Circle, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScreenHeading } from "@/components/screen-heading";
 import { SignInPrompt, useStudentAccount } from "@/components/student-account";
-import { pageHead, reminderOptions } from "@/lib/student-data";
+import { pageHead, reminderOptions, type Reminder } from "@/lib/student-data";
 import { api } from "@/lib/api";
 export const Route = createFileRoute("/reminders")({
   head: () =>
@@ -16,6 +16,7 @@ function Reminders() {
   const { user, profileId } = useStudentAccount();
   const client = useQueryClient();
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<Reminder | null>(null);
   const [filter, setFilter] = useState("Upcoming");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -37,6 +38,26 @@ function Reminders() {
       setAdding(false);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not save reminder.");
+    }
+    setBusy(false);
+  }
+  async function saveEdit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!editing || !profileId) return;
+    const form = new FormData(e.currentTarget);
+    setBusy(true);
+    try {
+      await api(`/reminders/${editing.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          title: String(form.get("title")).trim(),
+          due_at: new Date(String(form.get("due"))).toISOString(),
+        }),
+      });
+      await client.invalidateQueries({ queryKey: ["reminders", profileId] });
+      setEditing(null);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not update reminder.");
     }
     setBusy(false);
   }
@@ -63,7 +84,12 @@ function Reminders() {
         subtitle="Make room for what matters."
         action={
           user && (
-            <Button onClick={() => setAdding(!adding)}>
+            <Button
+              onClick={() => {
+                setEditing(null);
+                setAdding(!adding);
+              }}
+            >
               <Plus />
               {adding ? "Cancel" : "Add reminder"}
             </Button>
@@ -94,6 +120,42 @@ function Reminders() {
                 <input name="due" type="datetime-local" required className="student-input" />
               </label>
               <Button disabled={busy}>Save reminder</Button>
+            </form>
+          )}
+          {editing && (
+            <form
+              className="mb-8 flex flex-wrap items-end gap-4 border-b border-border pb-8"
+              onSubmit={saveEdit}
+            >
+              <label className="field-label flex-1">
+                Edit reminder
+                <input
+                  name="title"
+                  required
+                  maxLength={200}
+                  className="student-input"
+                  defaultValue={editing.title}
+                />
+              </label>
+              <label className="field-label">
+                Date & time
+                <input
+                  name="due"
+                  type="datetime-local"
+                  required
+                  className="student-input"
+                  defaultValue={toDateTimeLocal(editing.due_at)}
+                />
+              </label>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy}
+                onClick={() => setEditing(null)}
+              >
+                Cancel
+              </Button>
+              <Button disabled={busy}>{busy ? "Saving…" : "Save changes"}</Button>
             </form>
           )}
           <div className="mb-6 flex gap-2">
@@ -140,6 +202,20 @@ function Reminders() {
                     </p>
                   </div>
                   <Button
+                    title="Edit reminder"
+                    size="icon"
+                    variant="ghost"
+                    disabled={busy}
+                    aria-label={`Edit ${r.title}`}
+                    onClick={() => {
+                      setAdding(false);
+                      setEditing(r);
+                      setMessage("");
+                    }}
+                  >
+                    <Pencil />
+                  </Button>
+                  <Button
                     title="Delete reminder"
                     size="icon"
                     variant="ghost"
@@ -172,4 +248,9 @@ function Reminders() {
       )}
     </section>
   );
+}
+
+function toDateTimeLocal(value: string) {
+  const date = new Date(value);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }

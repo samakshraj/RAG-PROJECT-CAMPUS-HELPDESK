@@ -14,6 +14,8 @@ import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { StudentAccountProvider } from "@/components/student-account";
 import { StudentShell } from "@/components/student-shell";
+import { ReminderAlerts } from "@/components/reminder-alerts";
+import { Toaster } from "@/components/ui/sonner";
 
 function NotFoundComponent() {
   return (
@@ -131,6 +133,8 @@ function RootComponent() {
         <StudentShell>
           <Outlet />
         </StudentShell>
+        <ReminderAlerts />
+        <Toaster />
       </StudentAccountProvider>
     </QueryClientProvider>
   );

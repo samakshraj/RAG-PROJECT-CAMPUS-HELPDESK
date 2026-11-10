@@ -1,12 +1,21 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Plus, Ticket, ArrowLeft } from "lucide-react";
+import { Plus, Ticket, ArrowLeft, Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScreenHeading } from "@/components/screen-heading";
 import { SignInPrompt, useStudentAccount } from "@/components/student-account";
 import { pageHead, ticketOptions } from "@/lib/student-data";
 import { api } from "@/lib/api";
+import type { Ticket as TicketItem } from "@/lib/student-data";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 export const Route = createFileRoute("/tickets")({
   head: () =>
     pageHead("Tickets & requests", "Submit and track your campus complaints and requests."),
@@ -16,6 +25,8 @@ function Tickets() {
   const { user, profileId } = useStudentAccount();
   const client = useQueryClient();
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<TicketItem | null>(null);
+  const [deleting, setDeleting] = useState<TicketItem | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [kind, setKind] = useState<"Complaint" | "Request">("Complaint");
   const [busy, setBusy] = useState(false);
@@ -28,8 +39,8 @@ function Tickets() {
     setMessage("");
     const form = new FormData(e.currentTarget);
     try {
-      await api("/tickets", {
-        method: "POST",
+      await api(editing ? `/tickets/${editing.id}` : "/tickets", {
+        method: editing ? "PATCH" : "POST",
         body: JSON.stringify({
           kind,
           subject: String(form.get("subject")).trim(),
@@ -39,9 +50,25 @@ function Tickets() {
       });
       await client.invalidateQueries({ queryKey: ["tickets", profileId] });
       setCreating(false);
-      setMessage("Your ticket has been submitted.");
+      setEditing(null);
+      setMessage(editing ? "Your ticket has been updated." : "Your ticket has been submitted.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not submit the ticket.");
+    }
+    setBusy(false);
+  }
+  async function deleteTicket() {
+    if (!deleting || !profileId) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      await api(`/tickets/${deleting.id}`, { method: "DELETE" });
+      await client.invalidateQueries({ queryKey: ["tickets", profileId] });
+      setSelected(null);
+      setDeleting(null);
+      setMessage("Your ticket has been deleted.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not delete the ticket.");
     }
     setBusy(false);
   }
@@ -56,6 +83,7 @@ function Tickets() {
             <Button
               onClick={() => {
                 setCreating(!creating);
+                setEditing(null);
                 setSelected(null);
                 setMessage("");
               }}
@@ -68,8 +96,8 @@ function Tickets() {
       />
       {!user ? (
         <SignInPrompt action="submit and track your tickets" />
-      ) : creating ? (
-        <form className="max-w-2xl space-y-5" onSubmit={submit}>
+      ) : creating || editing ? (
+        <form className="max-w-2xl space-y-5" onSubmit={submit} key={editing?.id ?? "new"}>
           <div className="flex gap-2">
             {(["Complaint", "Request"] as const).map((k) => (
               <Button
@@ -84,11 +112,17 @@ function Tickets() {
           </div>
           <label className="field-label">
             Subject
-            <input name="subject" className="student-input" required maxLength={160} />
+            <input
+              name="subject"
+              className="student-input"
+              required
+              maxLength={160}
+              defaultValue={editing?.subject}
+            />
           </label>
           <label className="field-label">
             Category
-            <select name="category" className="student-input">
+            <select name="category" className="student-input" defaultValue={editing?.category}>
               <option>General</option>
               <option>Academics</option>
               <option>Facilities</option>
@@ -103,9 +137,12 @@ function Tickets() {
               className="student-input min-h-36"
               required
               maxLength={5000}
+              defaultValue={editing?.description}
             />
           </label>
-          <Button disabled={busy}>{busy ? "Submitting…" : "Submit ticket"}</Button>
+          <Button disabled={busy}>
+            {busy ? "Saving…" : editing ? "Save changes" : "Submit ticket"}
+          </Button>
         </form>
       ) : detail ? (
         <div className="max-w-2xl">
@@ -123,6 +160,23 @@ function Tickets() {
             </p>
           </div>
           <p className="mt-6 whitespace-pre-wrap leading-relaxed">{detail.description}</p>
+          <div className="mt-7 flex flex-wrap gap-3">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setKind(detail.kind);
+                setEditing(detail);
+                setSelected(null);
+              }}
+            >
+              <Pencil />
+              Edit ticket
+            </Button>
+            <Button variant="destructive" onClick={() => setDeleting(detail)}>
+              <Trash2 />
+              Delete ticket
+            </Button>
+          </div>
         </div>
       ) : query.isPending ? (
         <p>Loading tickets…</p>
@@ -170,6 +224,24 @@ function Tickets() {
           {message}
         </p>
       )}
+      <Dialog open={Boolean(deleting)} onOpenChange={(open) => !open && setDeleting(null)}>
+        <DialogContent className="max-w-md bg-card">
+          <DialogHeader>
+            <DialogTitle>Delete this ticket?</DialogTitle>
+            <DialogDescription>
+              {deleting ? `“${deleting.subject}” will be permanently deleted.` : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" disabled={busy} onClick={() => setDeleting(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" disabled={busy} onClick={deleteTicket}>
+              {busy ? "Deleting…" : "Delete ticket"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

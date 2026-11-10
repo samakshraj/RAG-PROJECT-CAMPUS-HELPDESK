@@ -100,6 +100,7 @@ if (await canUsePort(8000, "127.0.0.1")) {
       "127.0.0.1",
       "--port",
       "8000",
+      "--reload",
     ],
     "RAG API",
   );
