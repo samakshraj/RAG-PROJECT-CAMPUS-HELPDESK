@@ -76,6 +76,16 @@ CREATE TABLE IF NOT EXISTS managed_admins (
     created_by TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS master_admins (
+    uid TEXT PRIMARY KEY,
+    email TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS admin_dashboard_preferences (
+    uid TEXT PRIMARY KEY,
+    recent_activity_cleared_at TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS tickets (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
@@ -201,6 +211,22 @@ def is_admin(uid: str, db: sqlite3.Connection) -> bool:
         return True
     return db.execute("SELECT 1 FROM managed_admins WHERE uid = ?", (uid,)).fetchone() is not None
 
+def is_super_admin(uid: str) -> bool:
+    return uid in {item.strip() for item in os.getenv("ADMIN_UIDS", "").split(",") if item.strip()}
+
+def is_master_admin(uid: str, db: sqlite3.Connection) -> bool:
+    return db.execute("SELECT 1 FROM master_admins WHERE uid = ?", (uid,)).fetchone() is not None
+
+def can_manage_admins(uid: str, db: sqlite3.Connection) -> bool:
+    return is_super_admin(uid) or is_master_admin(uid, db)
+
+def admin_role(uid: str, db: sqlite3.Connection) -> str:
+    if is_super_admin(uid):
+        return "super_admin"
+    if is_master_admin(uid, db):
+        return "master_admin"
+    return "admin"
+
 def admin_user(user=Depends(current_user), db=Depends(database)):
     if not is_admin(user["uid"], db):
         raise HTTPException(status_code=403, detail="Administrator access required")
@@ -273,6 +299,14 @@ class ManagedUserInput(BaseModel):
 class ManagedAdminInput(BaseModel):
     email: str = Field(min_length=3, max_length=254)
     password: str | None = Field(default=None, min_length=8, max_length=128)
+
+class ManagedProfileInput(BaseModel):
+    full_name: str = Field(default="", max_length=120)
+    student_id: str = Field(default="", max_length=120)
+    department: str = Field(default="", max_length=120)
+    course: str = Field(default="", max_length=120)
+    year: str = Field(default="", max_length=40)
+    phone: str = Field(default="", max_length=40)
 
 class PasswordResetInput(BaseModel):
     password: str = Field(min_length=8, max_length=128)
@@ -413,15 +447,40 @@ def delete_own_account(payload: AccountDeletionInput, user=Depends(current_user)
     db.commit()
     return {"ok": True}
 
+@app.delete("/admin/account")
+def delete_own_admin_account(payload: AccountDeletionInput, user=Depends(admin_user), db=Depends(database)):
+    if payload.confirmation != "DELETE MY ACCOUNT":
+        raise HTTPException(422, "Type DELETE MY ACCOUNT to confirm account deletion")
+    if is_super_admin(user["uid"]):
+        raise HTTPException(status_code=403, detail="The super admin account cannot be deleted.")
+    uid = user["uid"]
+    ensure_firebase_admin()
+    try:
+        firebase_auth.delete_user(uid)
+    except Exception as exc:
+        if exc.__class__.__name__ != "UserNotFoundError":
+            raise HTTPException(status_code=400, detail=f"Could not delete account: {exc}") from exc
+    db.execute("DELETE FROM master_admins WHERE uid = ?", (uid,))
+    db.execute("DELETE FROM managed_admins WHERE uid = ?", (uid,))
+    for table in ("profiles", "reminders", "tickets", "chat_history", "auth_handoffs"):
+        column = "firebase_uid" if table == "profiles" else "uid" if table == "auth_handoffs" else "user_id"
+        db.execute(f"DELETE FROM {table} WHERE {column} = ?", (uid,))
+    db.commit()
+    return {"ok": True}
+
 @app.get("/admin/users")
 def list_managed_users(_=Depends(admin_user), db=Depends(database)):
     rows = db.execute(
-        "SELECT firebase_uid AS uid, email, full_name, student_id FROM profiles ORDER BY lower(full_name), lower(email)"
+        "SELECT firebase_uid AS uid, email, full_name, student_id, department, course, year, phone FROM profiles ORDER BY lower(full_name), lower(email)"
     ).fetchall()
     return [
-        {**serialize(row), "role": "admin" if is_admin(row["uid"], db) else "student"}
+        {**serialize(row), "role": admin_role(row["uid"], db) if is_admin(row["uid"], db) else "student"}
         for row in rows
     ]
+
+@app.get("/admin/access")
+def admin_access(user=Depends(admin_user), db=Depends(database)):
+    return {"role": admin_role(user["uid"], db)}
 
 @app.post("/admin/students", status_code=201)
 def create_student(payload: ManagedUserInput, user=Depends(admin_user), db=Depends(database)):
@@ -471,14 +530,72 @@ def create_admin(payload: ManagedAdminInput, user=Depends(admin_user), db=Depend
     db.commit()
     return {"uid": account.uid, "email": account.email or email, "full_name": account.display_name or "", "role": "admin"}
 
+@app.post("/admin/master-admins", status_code=201)
+def create_master_admin(payload: ManagedAdminInput, user=Depends(admin_user), db=Depends(database)):
+    """Only master and super admins may appoint a master admin."""
+    if not can_manage_admins(user["uid"], db):
+        raise HTTPException(status_code=403, detail="Only master or super admins can add a master administrator.")
+    result = create_admin(payload, user, db)
+    uid = result["uid"]
+    if is_super_admin(uid):
+        raise HTTPException(status_code=409, detail="The super admin is already protected and cannot be changed.")
+    db.execute(
+        "INSERT INTO master_admins (uid, email, created_by, created_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(uid) DO UPDATE SET email=excluded.email",
+        (uid, result["email"], user["uid"], timestamp()),
+    )
+    db.commit()
+    return {**result, "role": "master_admin"}
+
 @app.post("/admin/users/{uid}/password")
-def reset_user_password(uid: str, payload: PasswordResetInput, _=Depends(admin_user)):
+def reset_user_password(uid: str, payload: PasswordResetInput, user=Depends(admin_user), db=Depends(database)):
+    if is_admin(uid, db) and uid != user["uid"]:
+        if is_super_admin(uid) or not can_manage_admins(user["uid"], db):
+            raise HTTPException(status_code=403, detail="Only a master admin can reset another non-super admin's password.")
     ensure_firebase_admin()
     try:
         firebase_auth.update_user(uid, password=payload.password)
         firebase_auth.revoke_refresh_tokens(uid)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not reset password: {exc}") from exc
+    return {"ok": True}
+
+@app.put("/admin/users/{uid}/profile")
+def update_managed_profile(uid: str, payload: ManagedProfileInput, user=Depends(admin_user), db=Depends(database)):
+    if is_super_admin(uid):
+        raise HTTPException(status_code=403, detail="The super admin profile cannot be edited.")
+    if is_admin(uid, db) and not can_manage_admins(user["uid"], db):
+        raise HTTPException(status_code=403, detail="Master administrator access required.")
+    db.execute(
+        "UPDATE profiles SET full_name=?, student_id=?, department=?, course=?, year=?, phone=? WHERE firebase_uid=?",
+        (payload.full_name, payload.student_id, payload.department, payload.course, payload.year, payload.phone, uid),
+    )
+    db.commit()
+    profile = db.execute("SELECT firebase_uid AS uid, email, full_name, student_id FROM profiles WHERE firebase_uid = ?", (uid,)).fetchone()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Account profile not found")
+    return {**serialize(profile), "role": admin_role(uid, db) if is_admin(uid, db) else "student"}
+
+@app.delete("/admin/admins/{uid}")
+def remove_admin(uid: str, user=Depends(admin_user), db=Depends(database)):
+    if is_super_admin(uid):
+        raise HTTPException(status_code=403, detail="The super admin account cannot be deleted.")
+    if not is_admin(uid, db):
+        raise HTTPException(status_code=404, detail="Administrator account not found")
+    if not can_manage_admins(user["uid"], db):
+        raise HTTPException(status_code=403, detail="Master administrator access required.")
+    ensure_firebase_admin()
+    try:
+        firebase_auth.delete_user(uid)
+    except Exception as exc:
+        if exc.__class__.__name__ != "UserNotFoundError":
+            raise HTTPException(status_code=400, detail=f"Could not remove administrator account: {exc}") from exc
+    db.execute("DELETE FROM master_admins WHERE uid = ?", (uid,))
+    db.execute("DELETE FROM managed_admins WHERE uid = ?", (uid,))
+    for table in ("profiles", "reminders", "tickets", "chat_history", "auth_handoffs"):
+        column = "firebase_uid" if table == "profiles" else "uid" if table == "auth_handoffs" else "user_id"
+        db.execute(f"DELETE FROM {table} WHERE {column} = ?", (uid,))
+    db.commit()
     return {"ok": True}
 
 @app.delete("/admin/students/{uid}")
@@ -589,13 +706,35 @@ def admin_list_tickets(_=Depends(admin_user), db=Depends(database)):
     return [serialize(item) for item in db.execute("SELECT * FROM tickets ORDER BY created_at DESC").fetchall()]
 
 @app.get("/admin/overview")
-def admin_overview(_=Depends(admin_user), db=Depends(database)):
+def admin_overview(user=Depends(admin_user), db=Depends(database)):
+    preference = db.execute(
+        "SELECT recent_activity_cleared_at FROM admin_dashboard_preferences WHERE uid = ?", (user["uid"],)
+    ).fetchone()
+    cleared_at = preference["recent_activity_cleared_at"] if preference else ""
     return {
         "active_notices": db.execute("SELECT COUNT(*) FROM notices").fetchone()[0],
         "open_tickets": db.execute("SELECT COUNT(*) FROM tickets WHERE status = 'Open'").fetchone()[0],
-        "students": db.execute("SELECT COUNT(*) FROM profiles").fetchone()[0],
-        "recent_tickets": [serialize(item) for item in db.execute("SELECT * FROM tickets ORDER BY created_at DESC LIMIT 5").fetchall()],
+        "indexed_documents": db.execute(
+            "SELECT COUNT(*) FROM documents WHERE index_status = 'indexed'"
+        ).fetchone()[0],
+        "students": sum(
+            1 for profile in db.execute("SELECT firebase_uid FROM profiles").fetchall()
+            if not is_admin(profile["firebase_uid"], db)
+        ),
+        "recent_tickets": [serialize(item) for item in db.execute(
+            "SELECT * FROM tickets WHERE created_at > ? ORDER BY created_at DESC LIMIT 5", (cleared_at,)
+        ).fetchall()],
     }
+
+@app.post("/admin/overview/clear-recent-activity")
+def clear_recent_activity(user=Depends(admin_user), db=Depends(database)):
+    db.execute(
+        "INSERT INTO admin_dashboard_preferences (uid, recent_activity_cleared_at) VALUES (?, ?) "
+        "ON CONFLICT(uid) DO UPDATE SET recent_activity_cleared_at=excluded.recent_activity_cleared_at",
+        (user["uid"], timestamp()),
+    )
+    db.commit()
+    return {"ok": True}
 
 MAX_DOCUMENT_SIZE = 25 * 1024 * 1024
 ALLOWED_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx"}
@@ -681,6 +820,14 @@ def admin_update_ticket(ticket_id: str, payload: dict, _=Depends(admin_user), db
     item = db.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
     if not item: raise HTTPException(404, "Ticket not found")
     return serialize(item)
+
+@app.delete("/admin/tickets/{ticket_id}")
+def admin_delete_ticket(ticket_id: str, _=Depends(admin_user), db=Depends(database)):
+    result = db.execute("DELETE FROM tickets WHERE id = ?", (ticket_id,))
+    db.commit()
+    if result.rowcount == 0:
+        raise HTTPException(404, "Ticket not found")
+    return {"ok": True}
 
 @app.get("/reminders")
 def list_reminders(user=Depends(current_user), db=Depends(database)):

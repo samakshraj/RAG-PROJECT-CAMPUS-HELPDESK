@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { Search, Eye, X } from "lucide-react";
+import { Search, Eye, X, Trash2 } from "lucide-react";
 import { PageHeader, inputCls } from "@/components/AdminSidebar";
 import { api } from "@/lib/api";
 import { onAuthStateChanged } from "firebase/auth";
@@ -114,7 +114,7 @@ function Tickets() {
           <table className="w-full min-w-[760px] text-sm">
             <thead className="bg-muted text-left text-muted-foreground">
               <tr>
-                {["ID", "Subject", "Student", "Type", "Date", "Details", "Status"].map((h) => (
+                {["ID", "Subject", "Student", "Type", "Date", "Details", "Status", "Actions"].map((h) => (
                   <th key={h} className="px-4 py-3 font-medium">
                     {h}
                   </th>
@@ -174,11 +174,30 @@ function Tickets() {
                       ))}
                     </select>
                   </td>
+                  <td className="px-4 py-3">
+                    <button
+                      type="button"
+                      aria-label={`Delete ticket ${t.subject}`}
+                      title="Delete ticket"
+                      className="rounded-lg p-2 text-muted-foreground hover:bg-muted hover:text-destructive"
+                      onClick={() => {
+                        if (!window.confirm(`Delete ticket “${t.subject}”? This cannot be undone.`)) return;
+                        void api(`/admin/tickets/${encodeURIComponent(t.id)}`, { method: "DELETE" })
+                          .then(() => {
+                            setList(list.filter((x) => x.id !== t.id));
+                            if (selectedTicket?.id === t.id) setSelectedTicket(null);
+                          })
+                          .catch((err: unknown) => setError(err instanceof Error ? err.message : "Could not delete ticket."));
+                      }}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </td>
                 </tr>
               ))}
               {shown.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="p-8 text-center text-muted-foreground">
+                  <td colSpan={8} className="p-8 text-center text-muted-foreground">
                     No tickets found.
                   </td>
                 </tr>

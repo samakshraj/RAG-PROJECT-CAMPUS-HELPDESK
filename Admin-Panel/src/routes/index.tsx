@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Bell, Ticket, FileText, Users, ArrowUpRight } from "lucide-react";
+import { Bell, Ticket, FileText, Users, ArrowUpRight, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/AdminSidebar";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
@@ -24,6 +24,7 @@ export const Route = createFileRoute("/")({
 type Overview = {
   active_notices: number;
   open_tickets: number;
+  indexed_documents: number;
   students: number;
   recent_tickets: { id: string; subject: string; status: string; created_at: string }[];
 };
@@ -31,6 +32,7 @@ type Overview = {
 function Dashboard() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [error, setError] = useState("");
+  const [clearing, setClearing] = useState(false);
   useEffect(
     () =>
       onAuthStateChanged(adminAuth, (user) => {
@@ -49,8 +51,8 @@ function Dashboard() {
   const stats = [
     { label: "Active notices", value: overview?.active_notices ?? "—", icon: Bell, to: "/notices" },
     { label: "Open tickets", value: overview?.open_tickets ?? "—", icon: Ticket, to: "/tickets" },
-    { label: "Documents indexed", value: "—", icon: FileText, to: "/documents" },
-    { label: "Students served", value: overview?.students ?? "—", icon: Users, to: "/" },
+    { label: "Documents indexed", value: overview?.indexed_documents ?? "—", icon: FileText, to: "/documents" },
+    { label: "Students served", value: overview?.students ?? "—", icon: Users, to: "/profile", hash: "students" },
   ] as const;
   return (
     <div className="dots -m-6 flex flex-1 flex-col rounded-3xl p-6">
@@ -64,6 +66,7 @@ function Dashboard() {
           <Link
             key={s.label}
             to={s.to}
+            hash={"hash" in s ? s.hash : undefined}
             className="panel group p-4 transition hover:-translate-y-0.5"
           >
             <div className="flex items-center justify-between">
@@ -83,7 +86,24 @@ function Dashboard() {
         </p>
       )}
       <div className="panel mt-4 p-5">
-        <h2 className="font-semibold">Recent activity</h2>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="font-semibold">Recent activity</h2>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-semibold text-muted-foreground hover:bg-muted hover:text-destructive"
+            disabled={clearing || !(overview?.recent_tickets.length)}
+            onClick={() => {
+              if (!window.confirm("Clear recent activity from your dashboard? Tickets will not be deleted.")) return;
+              setClearing(true);
+              void api("/admin/overview/clear-recent-activity", { method: "POST" })
+                .then(() => setOverview((current) => current ? { ...current, recent_tickets: [] } : current))
+                .catch((e: unknown) => setError(e instanceof Error ? e.message : "Could not clear recent activity."))
+                .finally(() => setClearing(false));
+            }}
+          >
+            <Trash2 className="h-3.5 w-3.5" /> Clear
+          </button>
+        </div>
         <ul className="mt-2 divide-y">
           {(overview?.recent_tickets ?? []).map((ticket) => (
             <li key={ticket.id} className="flex justify-between py-2 text-sm">
@@ -96,6 +116,9 @@ function Dashboard() {
             </li>
           ))}
         </ul>
+        {overview && overview.recent_tickets.length === 0 && (
+          <p className="mt-2 text-sm text-muted-foreground">No recent activity.</p>
+        )}
       </div>
     </div>
   );

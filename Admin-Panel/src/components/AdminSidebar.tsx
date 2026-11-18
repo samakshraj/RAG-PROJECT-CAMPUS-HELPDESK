@@ -31,6 +31,7 @@ const items = [
 export function AdminSidebar() {
   const [user, setUser] = useState(adminAuth.currentUser);
   const [adminName, setAdminName] = useState(adminAuth.currentUser?.displayName || "Administrator");
+  const [adminRole, setAdminRole] = useState<"admin" | "master_admin" | "super_admin">("admin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -54,12 +55,18 @@ export function AdminSidebar() {
     const syncAdminProfile = () => {
       const current = adminAuth.currentUser;
       setAdminName(current?.displayName || "Administrator");
-      if (current)
+      if (current) {
         void api<{ full_name?: string }>("/profile")
           .then((profile) =>
             setAdminName(profile.full_name || current.displayName || "Administrator"),
           )
           .catch(() => {});
+        void api<{ role: "admin" | "master_admin" | "super_admin" }>("/admin/access")
+          .then(({ role }) => setAdminRole(role))
+          .catch(() => setAdminRole("admin"));
+      } else {
+        setAdminRole("admin");
+      }
     };
     const unsubscribe = onAuthStateChanged(adminAuth, (current) => {
       setUser(current);
@@ -143,7 +150,13 @@ export function AdminSidebar() {
               {user ? adminName : "Admin sign in required"}
             </div>
             <div className="text-xs text-muted-foreground">
-              {user ? "Admin access" : "Administrator"}
+              {user
+                ? adminRole === "super_admin"
+                  ? "Super admin access"
+                  : adminRole === "master_admin"
+                    ? "Master admin access"
+                    : "Admin access"
+                : "Administrator"}
             </div>
           </div>
         </div>

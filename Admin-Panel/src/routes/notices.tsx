@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { Plus, Trash2, Pin } from "lucide-react";
+import { Plus, Trash2, Pin, Pencil, X } from "lucide-react";
 import { PageHeader, btnGold, inputCls } from "@/components/AdminSidebar";
 import { api } from "@/lib/api";
 import { onAuthStateChanged } from "firebase/auth";
@@ -33,6 +33,7 @@ function Notices() {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [category, setCategory] = useState("General");
+  const [editing, setEditing] = useState<Notice | null>(null);
   useEffect(
     () =>
       onAuthStateChanged(adminAuth, () => {
@@ -61,6 +62,23 @@ function Notices() {
     setBody("");
   };
 
+  const saveEdit = async () => {
+    if (!editing || !title.trim() || !body.trim()) return;
+    try {
+      const updated = await api<Notice>(`/notices/${editing.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title: title.trim(), body: body.trim(), category }),
+      });
+      setList(list.map((item) => (item.id === updated.id ? updated : item)));
+      setEditing(null);
+      setTitle("");
+      setBody("");
+      setCategory("General");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not update notice.");
+    }
+  };
+
   return (
     <>
       <PageHeader
@@ -75,7 +93,10 @@ function Notices() {
       )}
       <div className="mt-5 grid gap-6 lg:grid-cols-[360px_1fr]">
         <div className="panel h-fit space-y-3 p-6">
-          <h2 className="font-semibold">New notice</h2>
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="font-semibold">{editing ? "Edit notice" : "New notice"}</h2>
+            {editing && <button type="button" aria-label="Cancel editing" onClick={() => { setEditing(null); setTitle(""); setBody(""); setCategory("General"); }} className="rounded-lg p-1 text-muted-foreground hover:bg-muted"><X className="h-4 w-4" /></button>}
+          </div>
           <input
             className={inputCls}
             placeholder="Title"
@@ -98,8 +119,8 @@ function Notices() {
             value={body}
             onChange={(e) => setBody(e.target.value)}
           />
-          <button className={btnGold} onClick={add} disabled={!title.trim()}>
-            <Plus className="h-4 w-4" /> Publish notice
+          <button className={btnGold} onClick={() => void (editing ? saveEdit() : add())} disabled={!title.trim() || !body.trim()}>
+            {editing ? <Pencil className="h-4 w-4" /> : <Plus className="h-4 w-4" />} {editing ? "Save changes" : "Publish notice"}
           </button>
         </div>
         <div className="space-y-3">
@@ -120,6 +141,13 @@ function Notices() {
                   <p className="mt-1 text-sm text-muted-foreground">{n.body}</p>
                 </div>
                 <div className="flex flex-col gap-2">
+                  <button
+                    aria-label={`Edit ${n.title}`}
+                    onClick={() => { setEditing(n); setTitle(n.title); setBody(n.body); setCategory(n.category); }}
+                    className="rounded-lg p-2 text-muted-foreground hover:bg-muted hover:text-primary"
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </button>
                   <button
                     aria-label="Pin"
                     onClick={() => {

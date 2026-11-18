@@ -13,6 +13,7 @@ import {
   UserPlus,
   Users,
   UserRound,
+  ShieldCheck,
 } from "lucide-react";
 import { PageHeader, inputCls } from "@/components/AdminSidebar";
 import { api } from "@/lib/api";
@@ -33,7 +34,11 @@ type ManagedUser = {
   email: string;
   full_name: string;
   student_id: string;
-  role: "admin" | "student";
+  role: "super_admin" | "master_admin" | "admin" | "student";
+  department: string;
+  course: string;
+  year: string;
+  phone: string;
 };
 type OwnProfile = {
   id: string;
@@ -56,6 +61,10 @@ function Profile() {
   const [studentPassword, setStudentPassword] = useState("");
   const [adminEmail, setAdminEmail] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
+  const [masterEmail, setMasterEmail] = useState("");
+  const [masterPassword, setMasterPassword] = useState("");
+  const [role, setRole] = useState<ManagedUser["role"]>("admin");
+  const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
   const [resetUid, setResetUid] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [currentUser, setCurrentUser] = useState(adminAuth.currentUser);
@@ -89,6 +98,7 @@ function Profile() {
           return;
         }
         void loadUsers();
+        void api<{ role: ManagedUser["role"] }>("/admin/access").then(({ role }) => setRole(role)).catch(() => {});
         void api<OwnProfile>("/profile")
           .then(setProfile)
           .catch((e: unknown) =>
@@ -158,6 +168,32 @@ function Profile() {
       }
     });
   };
+  const addMasterAdmin = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void run("master-admin", "Master administrator access added.", () =>
+      api("/admin/master-admins", {
+        method: "POST",
+        body: JSON.stringify({ email: masterEmail, ...(masterPassword ? { password: masterPassword } : {}) }),
+      }),
+    ).then((ok) => {
+      if (ok) { setMasterEmail(""); setMasterPassword(""); }
+    });
+  };
+  const saveManagedProfile = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!editingUser) return;
+    const form = new FormData(event.currentTarget);
+    void run(`profile-${editingUser.uid}`, "Administrator profile updated.", () =>
+      api(`/admin/users/${encodeURIComponent(editingUser.uid)}/profile`, {
+        method: "PUT",
+        body: JSON.stringify(Object.fromEntries(["full_name", "student_id", "department", "course", "year", "phone"].map((key) => [key, String(form.get(key) || "").trim()]))),
+      }),
+    ).then((ok) => { if (ok) setEditingUser(null); });
+  };
+  const canManageAdmins = role === "master_admin" || role === "super_admin";
+  const adminAccounts = users.filter((account) => account.role !== "student");
+  const studentAccounts = users.filter((account) => account.role === "student");
+  const groupedUsers = [...adminAccounts, ...studentAccounts];
   const resetPassword = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const uid = resetUid;
@@ -251,7 +287,11 @@ function Profile() {
           </div>
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Admin access
+              {role === "super_admin"
+                ? "Super admin access"
+                : role === "master_admin"
+                  ? "Master admin access"
+                  : "Admin access"}
             </p>
             <p className="font-semibold">
               {profile?.full_name || currentUser?.displayName || "Administrator"}
@@ -331,6 +371,23 @@ function Profile() {
             </button>
           </div>
         </form>
+        {role !== "super_admin" && (
+          <div className="mt-6 border-t border-border pt-5">
+            <h2 className="font-display font-bold text-destructive">Delete my account</h2>
+            <p className="mt-1 text-sm text-muted-foreground">Permanently remove your administrator account and profile.</p>
+            <button
+              type="button"
+              className="mt-3 inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-destructive hover:bg-destructive/10"
+              disabled={busy !== ""}
+              onClick={() => {
+                if (window.prompt("Type DELETE MY ACCOUNT to permanently delete your account.") !== "DELETE MY ACCOUNT") return;
+                void run("delete-own", "", () => api("/admin/account", { method: "DELETE", body: JSON.stringify({ confirmation: "DELETE MY ACCOUNT" }) })).then((ok) => {
+                  if (ok) void adminAuth.signOut();
+                });
+              }}
+            ><Trash2 className="h-4 w-4" /> Delete my account</button>
+          </div>
+        )}
         {profileMessage && (
           <p role="status" className="mt-3 text-sm text-muted-foreground">
             {profileMessage}
@@ -338,7 +395,7 @@ function Profile() {
         )}
       </section>
 
-      <div className="mt-5 grid gap-5 xl:grid-cols-2">
+      <div className="mt-5 grid gap-5 xl:grid-cols-3">
         <form onSubmit={addStudent} className="panel space-y-3 p-5">
           <div className="mb-2 flex items-center gap-2">
             <UserPlus className="h-5 w-5 text-primary" />
@@ -403,7 +460,40 @@ function Profile() {
             <Plus className="h-4 w-4" /> Grant administrator access
           </button>
         </form>
+
+        {canManageAdmins && <form onSubmit={addMasterAdmin} className="panel space-y-3 p-5">
+          <div className="mb-2 flex items-center gap-2">
+            <ShieldCheck className="h-5 w-5 text-primary" />
+            <h2 className="font-display text-lg font-bold">Master administrator</h2>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Master admins can manage non-super administrator accounts and profiles.
+          </p>
+          <input className={inputCls} type="email" placeholder="Master admin email" value={masterEmail} onChange={(e) => setMasterEmail(e.target.value)} required />
+          <input className={inputCls} type="password" placeholder="Password for new account (optional)" value={masterPassword} onChange={(e) => setMasterPassword(e.target.value)} minLength={masterPassword ? 8 : undefined} />
+          <button className="admin-button" disabled={busy !== ""}>
+            <Plus className="h-4 w-4" /> Add master admin
+          </button>
+        </form>}
       </div>
+
+      {editingUser && (
+        <section className="panel mt-5 p-5">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div><h2 className="font-display text-lg font-bold">Edit account profile</h2><p className="text-sm text-muted-foreground">{editingUser.email}</p></div>
+            <button type="button" className="rounded-lg px-3 py-2 text-sm hover:bg-muted" onClick={() => setEditingUser(null)}>Cancel</button>
+          </div>
+          <form onSubmit={saveManagedProfile} className="grid gap-3 sm:grid-cols-2">
+            {(["full_name", "student_id", "department", "course", "year", "phone"] as const).map((key) => (
+              <label key={key} className="space-y-1 text-sm font-medium">
+                {{ full_name: "Full name", student_id: "Staff / institute ID", department: "Department", course: "Course", year: "Year", phone: "Phone number" }[key]}
+                <input className={inputCls} name={key} defaultValue={editingUser[key] || ""} maxLength={120} required={key === "full_name"} />
+              </label>
+            ))}
+            <div className="sm:col-span-2"><button className="admin-button" disabled={busy !== ""}><Save className="h-4 w-4" /> Save account profile</button></div>
+          </form>
+        </section>
+      )}
 
       {error && (
         <p role="alert" className="mt-4 text-sm text-destructive">
@@ -418,10 +508,11 @@ function Profile() {
 
       <section className="panel mt-5 overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b p-4">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Users className="h-5 w-5 text-primary" />
             <h2 className="font-display text-lg font-bold">Accounts</h2>
-            <span className="rounded-full bg-muted px-2 py-0.5 text-xs">{users.length}</span>
+            <span className="rounded-full bg-muted px-2 py-0.5 text-xs">{adminAccounts.length} admins</span>
+            <span className="rounded-full bg-muted px-2 py-0.5 text-xs">{studentAccounts.length} students</span>
           </div>
           <button
             type="button"
@@ -442,10 +533,13 @@ function Profile() {
           </p>
         ) : (
           <div className="divide-y">
-            {users.map((account) => (
-              <div key={account.uid} className="flex flex-wrap items-center gap-3 p-4">
+            {groupedUsers.map((account, index) => (
+              <div key={account.uid} id={account.role === "student" && index === adminAccounts.length ? "students" : undefined}>
+                {index === 0 && adminAccounts.length > 0 && <div className="bg-muted/50 px-4 py-2 text-xs font-bold uppercase tracking-wider text-muted-foreground">Administrator accounts · {adminAccounts.length}</div>}
+                {account.role === "student" && index === adminAccounts.length && <div className="bg-muted/50 px-4 py-2 text-xs font-bold uppercase tracking-wider text-muted-foreground">Student accounts · {studentAccounts.length}</div>}
+              <div className="flex flex-wrap items-center gap-3 p-4">
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent text-accent-foreground">
-                  {account.role === "admin" ? (
+                  {account.role !== "student" ? (
                     <Shield className="h-5 w-5" />
                   ) : (
                     <Users className="h-5 w-5" />
@@ -454,12 +548,12 @@ function Profile() {
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-semibold">
                     {account.full_name ||
-                      (account.role === "admin"
+                      (account.role !== "student"
                         ? "Administrator"
                         : account.email || "Unnamed account")}
                   </p>
                   <p className="truncate text-xs text-muted-foreground">
-                    {account.role === "admin" ? "Admin access" : account.email}
+                    {account.role === "admin" ? "Admin access" : account.role === "master_admin" ? "Master admin access" : account.role === "super_admin" ? "Super admin access" : account.email}
                   </p>
                 </div>
                 <span className="rounded-full bg-muted px-3 py-1 text-xs font-semibold capitalize">
@@ -499,7 +593,7 @@ function Profile() {
                       Cancel
                     </button>
                   </form>
-                ) : (
+                ) : (account.role === "student" || (canManageAdmins && account.role !== "super_admin")) && (
                   <button
                     type="button"
                     className="rounded-lg p-2 text-muted-foreground hover:bg-muted hover:text-primary"
@@ -536,6 +630,25 @@ function Profile() {
                     <Trash2 className="h-4 w-4" />
                   </button>
                 )}
+                {(account.role === "student" || canManageAdmins) && account.role !== "super_admin" && (
+                  <>
+                    <button type="button" className="rounded-lg p-2 text-muted-foreground hover:bg-muted hover:text-primary" title="Edit account profile" aria-label={`Edit ${account.email}`} onClick={() => setEditingUser(account)}>
+                      <Save className="h-4 w-4" />
+                    </button>
+                    {account.role !== "student" && <button
+                      type="button"
+                      className="rounded-lg p-2 text-muted-foreground hover:bg-muted hover:text-destructive"
+                      title="Remove administrator"
+                      aria-label={`Remove ${account.email}`}
+                      disabled={busy !== ""}
+                      onClick={() => {
+                        if (window.confirm(`Remove administrator account ${account.email}? This cannot be undone.`))
+                          void run(`remove-admin-${account.uid}`, "Administrator account removed.", () => api(`/admin/admins/${encodeURIComponent(account.uid)}`, { method: "DELETE" }));
+                      }}
+                    ><Trash2 className="h-4 w-4" /></button>}
+                  </>
+                )}
+              </div>
               </div>
             ))}
           </div>
