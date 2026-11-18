@@ -12,7 +12,7 @@ python -m venv campus-helpdesk-chat/.venv
 & "campus-helpdesk-chat/.venv/Scripts/python.exe" -m pip install -r campus-helpdesk-chat/rag-service/requirements.txt
 ```
 
-Copy `campus-helpdesk-chat/.env.example` to `campus-helpdesk-chat/.env`, then configure Firebase service-account credentials, admin UIDs, the Groq key, and the campus PDF folder as described in [the API setup guide](campus-helpdesk-chat/rag-service/README.md). The login app and admin panel also have `.env.example` files; copy them to `.env` in their respective folders if their settings need to differ. Never commit `.env` files or service-account keys.
+Copy `campus-helpdesk-chat/.env.example` to `campus-helpdesk-chat/.env`, then configure Firebase service-account credentials, any super-admin UIDs, the Groq key, and the campus PDF folder as described in [the API setup guide](campus-helpdesk-chat/rag-service/README.md). On first startup the configured local demo master-admin, admin, and student accounts are restored automatically; this is enabled by `PRELOAD_DEMO_ACCOUNTS=true`. The login app and admin panel also have `.env.example` files; copy them to `.env` in their respective folders if their settings need to differ. Never commit `.env` files or service-account keys.
 
 ## Run an app
 

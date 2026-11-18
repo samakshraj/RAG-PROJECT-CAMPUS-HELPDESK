@@ -371,7 +371,7 @@ function Profile() {
             </button>
           </div>
         </form>
-        {role !== "super_admin" && (
+        {role !== "super_admin" && role !== "master_admin" && (
           <div className="mt-6 border-t border-border pt-5">
             <h2 className="font-display font-bold text-destructive">Delete my account</h2>
             <p className="mt-1 text-sm text-muted-foreground">Permanently remove your administrator account and profile.</p>
@@ -635,7 +635,7 @@ function Profile() {
                     <button type="button" className="rounded-lg p-2 text-muted-foreground hover:bg-muted hover:text-primary" title="Edit account profile" aria-label={`Edit ${account.email}`} onClick={() => setEditingUser(account)}>
                       <Save className="h-4 w-4" />
                     </button>
-                    {account.role !== "student" && <button
+                    {account.role !== "student" && account.role !== "master_admin" && <button
                       type="button"
                       className="rounded-lg p-2 text-muted-foreground hover:bg-muted hover:text-destructive"
                       title="Remove administrator"

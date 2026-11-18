@@ -6,7 +6,7 @@ The FastAPI service serves the RAG chatbot and the shared SQLite API used by the
 
 1. Set `SQLITE_DATABASE_PATH=data/campus_helpdesk.sqlite3` in `campus-helpdesk-chat/.env` (or leave the default). The file is stored under the campus app data directory and is ignored by Git.
 2. Create a Firebase service account for the Firebase project used by both web apps. Set `GOOGLE_APPLICATION_CREDENTIALS` to its local JSON path, or set `FIREBASE_SERVICE_ACCOUNT_JSON` to the JSON contents. Keep this credential out of source control.
-3. Add admin Firebase UIDs to `ADMIN_UIDS` as a comma-separated list. Only these accounts are sent to the admin panel and can read all tickets, update ticket status, and manage notices. If this list is empty, login routes everyone to the student dashboard.
+3. Add admin Firebase UIDs to `ADMIN_UIDS` as a comma-separated list if you need immutable super-admin accounts. Managed admins (including the preloaded master admin) are stored in SQLite. The project preloads its documented demo master-admin, admin, and student accounts on API startup by default (`PRELOAD_DEMO_ACCOUNTS=true`). It creates any missing Firebase users and restores their local profiles and roles without changing existing passwords. This requires the service account from step 2; do not commit it. Set `PRELOAD_DEMO_ACCOUNTS=false` for production.
 4. Set `GROQ_API_KEY`, `RAG_PDF_DIR`, and `RAG_CHROMA_DIR` if you want the document-grounded chatbot enabled. Chroma remains the vector index; SQLite stores profiles, tickets, reminders, notices, uploaded document files, one-time login handoffs, and signed-in chat history.
 5. To email students when a reminder becomes due, set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `SMTP_FROM` in `campus-helpdesk-chat/.env`. The service checks due reminders every 60 seconds by default (`REMINDER_CHECK_INTERVAL_SECONDS`) and sends each incomplete reminder once. Email delivery stays disabled until all SMTP settings are supplied.
 6. Copy `campus-helpdesk-chat/.env.example` to `.env`; copy the examples for `react-login-page` and `Admin-Panel` to each app `.env`. The login page, student dashboard, and admin dashboard use the same `VITE_RAG_API_URL`.
@@ -22,3 +22,15 @@ Admin document uploads are stored as file data and metadata in the SQLite databa
 The login API verifies the Firebase ID token and creates a random, single-use 90-second handoff code. The destination redeems it for a Firebase custom token signed by the server service account. This runs in the Python API; it does not require Firebase Cloud Functions or a Blaze upgrade. Student data endpoints are scoped to the verified Firebase UID. Admin endpoints also check that UID against `ADMIN_UIDS`.
 
 Existing records in the former database are not copied automatically. Export/import them if you need to retain those records.
+
+## Preloaded local accounts
+
+After cloning, copy `.env.example` to `.env`, configure the Firebase service-account credentials, and start any app once. The API will create or restore these accounts automatically:
+
+| Role | Email | Password (new account only) |
+| --- | --- | --- |
+| Master admin | `qwerty123@gmail.com` | `qwerty123` |
+| Admin | `qwertyuiop@gmail.com` | `qwertyuiop` |
+| Student | `asdfghjk@gmail.com` | `asdfghjk` |
+
+Firebase users and the SQLite database are not repository files, so Git cannot carry them to another computer. Existing accounts are never reset by the preloader. Master-admin accounts are protected from self-deletion and from deletion by another administrator.

@@ -58,6 +58,30 @@ DATABASE_PATH = Path(database_path_value).expanduser() if database_path_value el
 if not DATABASE_PATH.is_absolute():
     DATABASE_PATH = ROOT / DATABASE_PATH
 
+# These are deliberately demo accounts for a locally cloned copy of the project.
+# Firebase Authentication is an external service and SQLite data is intentionally
+# ignored by Git, so neither is transferred by `git clone`.
+DEFAULT_ACCOUNTS = (
+    {
+        "email": "qwerty123@gmail.com",
+        "password": "qwerty123",
+        "full_name": "Master Administrator",
+        "role": "master_admin",
+    },
+    {
+        "email": "qwertyuiop@gmail.com",
+        "password": "qwertyuiop",
+        "full_name": "Administrator",
+        "role": "admin",
+    },
+    {
+        "email": "asdfghjk@gmail.com",
+        "password": "asdfghjk",
+        "full_name": "Demo Student",
+        "role": "student",
+    },
+)
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS profiles (
     id TEXT PRIMARY KEY,
@@ -156,6 +180,82 @@ def ensure_firebase_admin():
         credential = credentials.Certificate(json.loads(service_account)) if service_account else credentials.ApplicationDefault()
         firebase_admin.initialize_app(credential)
 
+def preloaded_accounts_enabled() -> bool:
+    return os.getenv("PRELOAD_DEMO_ACCOUNTS", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+def get_or_create_seed_account(account: dict[str, str]):
+    """Return a Firebase account without overwriting an existing user's password."""
+    try:
+        return firebase_auth.get_user_by_email(account["email"])
+    except Exception as exc:
+        if exc.__class__.__name__ != "UserNotFoundError":
+            raise
+    return firebase_auth.create_user(
+        email=account["email"],
+        password=account["password"],
+        display_name=account["full_name"],
+    )
+
+def preload_default_accounts(connection: sqlite3.Connection) -> None:
+    """Create the documented local demo accounts and restore their local roles.
+
+    This is idempotent: existing Firebase users keep their current passwords and
+    the local role/profile rows are simply restored after a fresh clone.
+    """
+    if not preloaded_accounts_enabled():
+        return
+    try:
+        ensure_firebase_admin()
+        accounts = [(definition, get_or_create_seed_account(definition)) for definition in DEFAULT_ACCOUNTS]
+    except Exception as exc:
+        # The API can still serve public endpoints. Authenticated calls will give
+        # the normal, actionable Firebase configuration error instead.
+        print(f"Demo account preload skipped: Firebase is not configured ({exc}).")
+        return
+
+    master_uid = next(account.uid for definition, account in accounts if definition["role"] == "master_admin")
+    for definition, account in accounts:
+        uid = account.uid
+        email = account.email or definition["email"]
+        full_name = account.display_name or definition["full_name"]
+        connection.execute(
+            "INSERT INTO profiles (id, firebase_uid, email, full_name) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(firebase_uid) DO UPDATE SET email=excluded.email, "
+            "full_name=CASE WHEN profiles.full_name = '' THEN excluded.full_name ELSE profiles.full_name END",
+            (new_id(), uid, email, full_name),
+        )
+        if definition["role"] in {"admin", "master_admin"}:
+            connection.execute(
+                "INSERT INTO managed_admins (uid, email, created_by, created_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(uid) DO UPDATE SET email=excluded.email",
+                (uid, email, master_uid, timestamp()),
+            )
+        if definition["role"] == "master_admin":
+            connection.execute(
+                "INSERT INTO master_admins (uid, email, created_by, created_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(uid) DO UPDATE SET email=excluded.email",
+                (uid, email, master_uid, timestamp()),
+            )
+    connection.commit()
+
+def initialize_database_and_demo_accounts() -> None:
+    """Prepare the clone's local database and, when configured, its demo users."""
+    connection = None
+    try:
+        DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(DATABASE_PATH, timeout=10)
+        connection.row_factory = sqlite3.Row
+        connection.executescript(SCHEMA)
+        ensure_document_columns(connection)
+        ensure_chat_history_columns(connection)
+        ensure_reminder_columns(connection)
+        preload_default_accounts(connection)
+    except sqlite3.Error as exc:
+        print(f"Demo account preload skipped: could not open SQLite database ({exc}).")
+    finally:
+        if connection is not None:
+            connection.close()
+
 def database():
     connection = None
     try:
@@ -192,6 +292,10 @@ def ensure_reminder_columns(connection: sqlite3.Connection) -> None:
     columns = {row[1] for row in connection.execute("PRAGMA table_info(reminders)").fetchall()}
     if "email_sent_at" not in columns:
         connection.execute("ALTER TABLE reminders ADD COLUMN email_sent_at TEXT")
+
+@app.on_event("startup")
+def initialize_local_clone() -> None:
+    initialize_database_and_demo_accounts()
 
 def current_user(authorization: str | None = Header(default=None)):
     if not authorization or not authorization.startswith("Bearer "):
@@ -453,6 +557,8 @@ def delete_own_admin_account(payload: AccountDeletionInput, user=Depends(admin_u
         raise HTTPException(422, "Type DELETE MY ACCOUNT to confirm account deletion")
     if is_super_admin(user["uid"]):
         raise HTTPException(status_code=403, detail="The super admin account cannot be deleted.")
+    if is_master_admin(user["uid"], db):
+        raise HTTPException(status_code=403, detail="The master administrator account cannot be deleted.")
     uid = user["uid"]
     ensure_firebase_admin()
     try:
@@ -580,6 +686,8 @@ def update_managed_profile(uid: str, payload: ManagedProfileInput, user=Depends(
 def remove_admin(uid: str, user=Depends(admin_user), db=Depends(database)):
     if is_super_admin(uid):
         raise HTTPException(status_code=403, detail="The super admin account cannot be deleted.")
+    if is_master_admin(uid, db):
+        raise HTTPException(status_code=403, detail="Master administrator accounts cannot be deleted.")
     if not is_admin(uid, db):
         raise HTTPException(status_code=404, detail="Administrator account not found")
     if not can_manage_admins(user["uid"], db):
