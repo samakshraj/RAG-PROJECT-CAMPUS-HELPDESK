@@ -1,6 +1,3 @@
-MASTER ADMIN - qwerty123@gmail.com
-PASSWORD - qwerty123
-
 ADMIN - qwertyuiop@gmail.com
 PASS - qwertyuiop
 

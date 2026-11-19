@@ -6,15 +6,15 @@ import { fileURLToPath } from "node:url";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(projectRoot, "..");
-const appTarget = process.argv[2] || "student";
+const appTarget = process.argv[2] || "all";
 const apps = {
   student: { root: projectRoot, port: 5174, label: "Student dashboard" },
   login: { root: resolve(projectRoot, "..", "react-login-page"), port: 5173, label: "Login page" },
   admin: { root: resolve(projectRoot, "..", "Admin-Panel"), port: 5175, label: "Admin panel" },
 };
-const app = apps[appTarget];
-if (!app) {
-  console.error(`Unknown app target "${appTarget}". Use student, login, or admin.`);
+const selectedApps = appTarget === "all" ? Object.values(apps) : [apps[appTarget]];
+if (selectedApps.includes(undefined)) {
+  console.error(`Unknown app target "${appTarget}". Use student, login, admin, or all.`);
   process.exit(1);
 }
 
@@ -52,6 +52,13 @@ async function supportsDocumentIndexingApi() {
   }
 }
 
+async function findAvailablePort(start, end) {
+  for (let port = start; port <= end; port += 1) {
+    if (await canUsePort(port, "127.0.0.1")) return port;
+  }
+  return null;
+}
+
 const children = [];
 let stopping = false;
 
@@ -86,7 +93,8 @@ function start(command, args, label, cwd = projectRoot) {
   return child;
 }
 
-if (await canUsePort(8000, "127.0.0.1")) {
+let apiPort = 8000;
+if (await canUsePort(apiPort, "127.0.0.1")) {
   console.log("Starting the campus RAG API. Press Ctrl+C to stop it.");
   start(
     pythonPath,
@@ -99,8 +107,7 @@ if (await canUsePort(8000, "127.0.0.1")) {
       "--host",
       "127.0.0.1",
       "--port",
-      "8000",
-      "--reload",
+      String(apiPort),
     ],
     "RAG API",
   );
@@ -108,29 +115,57 @@ if (await canUsePort(8000, "127.0.0.1")) {
   if (await supportsDocumentIndexingApi()) {
     console.log("Port 8000 is already in use. Using the existing helpdesk API.");
   } else {
-    console.error(
-      "The API on port 8000 does not expose the current document indexing routes. Stop the older API process and rerun this command to load the latest RAG code.",
+    const fallbackPort = await findAvailablePort(8001, 8010);
+    if (!fallbackPort) {
+      console.error(
+        "Port 8000 is occupied by an incompatible API, and no fallback API port from 8001 to 8010 is available.",
+      );
+      process.exit(1);
+    }
+    apiPort = fallbackPort;
+    console.warn(
+      `Port 8000 is occupied by an incompatible API. Starting this project's API on port ${apiPort} instead.`,
     );
-    process.exit(1);
+    start(
+      pythonPath,
+      [
+        "-m",
+        "uvicorn",
+        "main:app",
+        "--app-dir",
+        "rag-service",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        String(apiPort),
+      ],
+      "RAG API",
+    );
   }
 }
+
+process.env.VITE_RAG_API_URL = `http://127.0.0.1:${apiPort}`;
 
 const vitePath = join(repositoryRoot, "node_modules", "vite", "bin", "vite.js");
 if (!existsSync(vitePath)) {
   console.error("Shared dependencies are missing. Run npm install from the repository root.");
   stopAll(1);
-} else if (await canUsePort(app.port, "localhost")) {
-  console.log(`Starting ${app.label} at http://localhost:${app.port}.`);
-  start(
-    process.execPath,
-    [vitePath, "dev", "--host", "localhost", "--port", String(app.port), "--strictPort"],
-    app.label,
-    app.root,
-  );
 } else {
-  console.log(
-    `Port ${app.port} is already in use. Leaving the existing ${app.label.toLowerCase()} running.`,
-  );
+  for (const app of selectedApps) {
+    if (await canUsePort(app.port, "localhost")) {
+      console.log(`Starting ${app.label} at http://localhost:${app.port}.`);
+      start(
+        process.execPath,
+        [vitePath, "dev", "--host", "localhost", "--port", String(app.port), "--strictPort"],
+        app.label,
+        app.root,
+      );
+    } else {
+      console.log(
+        `Port ${app.port} is already in use. Leaving the existing ${app.label.toLowerCase()} running.`,
+      );
+    }
+  }
 }
 
 process.on("SIGINT", () => stopAll(130));

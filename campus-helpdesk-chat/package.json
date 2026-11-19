@@ -4,7 +4,8 @@
   "sideEffects": false,
   "type": "module",
   "scripts": {
-    "dev": "node scripts/dev-local.js student",
+    "dev": "node scripts/dev-local.js",
+    "dev:student": "node scripts/dev-local.js student",
     "dev:full": "node scripts/dev-local.js",
     "dev:login": "node scripts/dev-local.js login",
     "dev:admin": "node scripts/dev-local.js admin",

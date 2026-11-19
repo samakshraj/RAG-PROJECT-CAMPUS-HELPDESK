@@ -2,7 +2,7 @@
   "name": "campus-helpdesk",
   "private": true,
   "scripts": {
-    "dev": "node campus-helpdesk-chat/scripts/dev-local.js student",
+    "dev": "node campus-helpdesk-chat/scripts/dev-local.js",
     "dev:student": "node campus-helpdesk-chat/scripts/dev-local.js student",
     "dev:login": "node campus-helpdesk-chat/scripts/dev-local.js login",
     "dev:admin": "node campus-helpdesk-chat/scripts/dev-local.js admin",

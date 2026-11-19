@@ -5,6 +5,7 @@ import {
   KeyRound,
   Loader2,
   LockKeyhole,
+  Pencil,
   Plus,
   RefreshCw,
   Save,
@@ -13,7 +14,6 @@ import {
   UserPlus,
   Users,
   UserRound,
-  ShieldCheck,
 } from "lucide-react";
 import { PageHeader, inputCls } from "@/components/AdminSidebar";
 import { api } from "@/lib/api";
@@ -34,7 +34,7 @@ type ManagedUser = {
   email: string;
   full_name: string;
   student_id: string;
-  role: "super_admin" | "master_admin" | "admin" | "student";
+  role: "super_admin" | "admin" | "student";
   department: string;
   course: string;
   year: string;
@@ -61,8 +61,6 @@ function Profile() {
   const [studentPassword, setStudentPassword] = useState("");
   const [adminEmail, setAdminEmail] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
-  const [masterEmail, setMasterEmail] = useState("");
-  const [masterPassword, setMasterPassword] = useState("");
   const [role, setRole] = useState<ManagedUser["role"]>("admin");
   const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
   const [resetUid, setResetUid] = useState("");
@@ -168,17 +166,6 @@ function Profile() {
       }
     });
   };
-  const addMasterAdmin = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    void run("master-admin", "Master administrator access added.", () =>
-      api("/admin/master-admins", {
-        method: "POST",
-        body: JSON.stringify({ email: masterEmail, ...(masterPassword ? { password: masterPassword } : {}) }),
-      }),
-    ).then((ok) => {
-      if (ok) { setMasterEmail(""); setMasterPassword(""); }
-    });
-  };
   const saveManagedProfile = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!editingUser) return;
@@ -190,7 +177,7 @@ function Profile() {
       }),
     ).then((ok) => { if (ok) setEditingUser(null); });
   };
-  const canManageAdmins = role === "master_admin" || role === "super_admin";
+  const canManageAdmins = role === "super_admin";
   const adminAccounts = users.filter((account) => account.role !== "student");
   const studentAccounts = users.filter((account) => account.role === "student");
   const groupedUsers = [...adminAccounts, ...studentAccounts];
@@ -289,9 +276,7 @@ function Profile() {
             <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
               {role === "super_admin"
                 ? "Super admin access"
-                : role === "master_admin"
-                  ? "Master admin access"
-                  : "Admin access"}
+                : "Admin access"}
             </p>
             <p className="font-semibold">
               {profile?.full_name || currentUser?.displayName || "Administrator"}
@@ -371,7 +356,7 @@ function Profile() {
             </button>
           </div>
         </form>
-        {role !== "super_admin" && role !== "master_admin" && (
+        {role !== "super_admin" && (
           <div className="mt-6 border-t border-border pt-5">
             <h2 className="font-display font-bold text-destructive">Delete my account</h2>
             <p className="mt-1 text-sm text-muted-foreground">Permanently remove your administrator account and profile.</p>
@@ -431,7 +416,7 @@ function Profile() {
           </button>
         </form>
 
-        <form onSubmit={addAdmin} className="panel space-y-3 p-5">
+        {canManageAdmins && <form onSubmit={addAdmin} className="panel space-y-3 p-5">
           <div className="mb-2 flex items-center gap-2">
             <Shield className="h-5 w-5 text-primary" />
             <h2 className="font-display text-lg font-bold">Add administrator</h2>
@@ -458,21 +443,6 @@ function Profile() {
           </p>
           <button className="admin-button" disabled={busy !== ""}>
             <Plus className="h-4 w-4" /> Grant administrator access
-          </button>
-        </form>
-
-        {canManageAdmins && <form onSubmit={addMasterAdmin} className="panel space-y-3 p-5">
-          <div className="mb-2 flex items-center gap-2">
-            <ShieldCheck className="h-5 w-5 text-primary" />
-            <h2 className="font-display text-lg font-bold">Master administrator</h2>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Master admins can manage non-super administrator accounts and profiles.
-          </p>
-          <input className={inputCls} type="email" placeholder="Master admin email" value={masterEmail} onChange={(e) => setMasterEmail(e.target.value)} required />
-          <input className={inputCls} type="password" placeholder="Password for new account (optional)" value={masterPassword} onChange={(e) => setMasterPassword(e.target.value)} minLength={masterPassword ? 8 : undefined} />
-          <button className="admin-button" disabled={busy !== ""}>
-            <Plus className="h-4 w-4" /> Add master admin
           </button>
         </form>}
       </div>
@@ -553,7 +523,7 @@ function Profile() {
                         : account.email || "Unnamed account")}
                   </p>
                   <p className="truncate text-xs text-muted-foreground">
-                    {account.role === "admin" ? "Admin access" : account.role === "master_admin" ? "Master admin access" : account.role === "super_admin" ? "Super admin access" : account.email}
+                    {account.role === "admin" ? "Admin access" : account.role === "super_admin" ? "Super admin access" : account.email}
                   </p>
                 </div>
                 <span className="rounded-full bg-muted px-3 py-1 text-xs font-semibold capitalize">
@@ -633,9 +603,9 @@ function Profile() {
                 {(account.role === "student" || canManageAdmins) && account.role !== "super_admin" && (
                   <>
                     <button type="button" className="rounded-lg p-2 text-muted-foreground hover:bg-muted hover:text-primary" title="Edit account profile" aria-label={`Edit ${account.email}`} onClick={() => setEditingUser(account)}>
-                      <Save className="h-4 w-4" />
+                      <Pencil className="h-4 w-4" />
                     </button>
-                    {account.role !== "student" && account.role !== "master_admin" && <button
+                    {account.role !== "student" && <button
                       type="button"
                       className="rounded-lg p-2 text-muted-foreground hover:bg-muted hover:text-destructive"
                       title="Remove administrator"

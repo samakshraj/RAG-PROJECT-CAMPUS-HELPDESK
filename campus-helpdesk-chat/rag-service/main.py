@@ -63,12 +63,6 @@ if not DATABASE_PATH.is_absolute():
 # ignored by Git, so neither is transferred by `git clone`.
 DEFAULT_ACCOUNTS = (
     {
-        "email": "qwerty123@gmail.com",
-        "password": "qwerty123",
-        "full_name": "Master Administrator",
-        "role": "master_admin",
-    },
-    {
         "email": "qwertyuiop@gmail.com",
         "password": "qwertyuiop",
         "full_name": "Administrator",
@@ -95,12 +89,6 @@ CREATE TABLE IF NOT EXISTS profiles (
     phone TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS managed_admins (
-    uid TEXT PRIMARY KEY,
-    email TEXT NOT NULL DEFAULT '',
-    created_by TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS master_admins (
     uid TEXT PRIMARY KEY,
     email TEXT NOT NULL DEFAULT '',
     created_by TEXT NOT NULL,
@@ -213,7 +201,6 @@ def preload_default_accounts(connection: sqlite3.Connection) -> None:
         print(f"Demo account preload skipped: Firebase is not configured ({exc}).")
         return
 
-    master_uid = next(account.uid for definition, account in accounts if definition["role"] == "master_admin")
     for definition, account in accounts:
         uid = account.uid
         email = account.email or definition["email"]
@@ -224,17 +211,11 @@ def preload_default_accounts(connection: sqlite3.Connection) -> None:
             "full_name=CASE WHEN profiles.full_name = '' THEN excluded.full_name ELSE profiles.full_name END",
             (new_id(), uid, email, full_name),
         )
-        if definition["role"] in {"admin", "master_admin"}:
+        if definition["role"] == "admin":
             connection.execute(
                 "INSERT INTO managed_admins (uid, email, created_by, created_at) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(uid) DO UPDATE SET email=excluded.email",
-                (uid, email, master_uid, timestamp()),
-            )
-        if definition["role"] == "master_admin":
-            connection.execute(
-                "INSERT INTO master_admins (uid, email, created_by, created_at) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(uid) DO UPDATE SET email=excluded.email",
-                (uid, email, master_uid, timestamp()),
+                (uid, email, uid, timestamp()),
             )
     connection.commit()
 
@@ -246,6 +227,7 @@ def initialize_database_and_demo_accounts() -> None:
         connection = sqlite3.connect(DATABASE_PATH, timeout=10)
         connection.row_factory = sqlite3.Row
         connection.executescript(SCHEMA)
+        connection.execute("DROP TABLE IF EXISTS master_admins")
         ensure_document_columns(connection)
         ensure_chat_history_columns(connection)
         ensure_reminder_columns(connection)
@@ -318,17 +300,9 @@ def is_admin(uid: str, db: sqlite3.Connection) -> bool:
 def is_super_admin(uid: str) -> bool:
     return uid in {item.strip() for item in os.getenv("ADMIN_UIDS", "").split(",") if item.strip()}
 
-def is_master_admin(uid: str, db: sqlite3.Connection) -> bool:
-    return db.execute("SELECT 1 FROM master_admins WHERE uid = ?", (uid,)).fetchone() is not None
-
-def can_manage_admins(uid: str, db: sqlite3.Connection) -> bool:
-    return is_super_admin(uid) or is_master_admin(uid, db)
-
 def admin_role(uid: str, db: sqlite3.Connection) -> str:
     if is_super_admin(uid):
         return "super_admin"
-    if is_master_admin(uid, db):
-        return "master_admin"
     return "admin"
 
 def admin_user(user=Depends(current_user), db=Depends(database)):
@@ -557,8 +531,6 @@ def delete_own_admin_account(payload: AccountDeletionInput, user=Depends(admin_u
         raise HTTPException(422, "Type DELETE MY ACCOUNT to confirm account deletion")
     if is_super_admin(user["uid"]):
         raise HTTPException(status_code=403, detail="The super admin account cannot be deleted.")
-    if is_master_admin(user["uid"], db):
-        raise HTTPException(status_code=403, detail="The master administrator account cannot be deleted.")
     uid = user["uid"]
     ensure_firebase_admin()
     try:
@@ -566,7 +538,6 @@ def delete_own_admin_account(payload: AccountDeletionInput, user=Depends(admin_u
     except Exception as exc:
         if exc.__class__.__name__ != "UserNotFoundError":
             raise HTTPException(status_code=400, detail=f"Could not delete account: {exc}") from exc
-    db.execute("DELETE FROM master_admins WHERE uid = ?", (uid,))
     db.execute("DELETE FROM managed_admins WHERE uid = ?", (uid,))
     for table in ("profiles", "reminders", "tickets", "chat_history", "auth_handoffs"):
         column = "firebase_uid" if table == "profiles" else "uid" if table == "auth_handoffs" else "user_id"
@@ -610,6 +581,8 @@ def create_student(payload: ManagedUserInput, user=Depends(admin_user), db=Depen
 
 @app.post("/admin/admins", status_code=201)
 def create_admin(payload: ManagedAdminInput, user=Depends(admin_user), db=Depends(database)):
+    if not is_super_admin(user["uid"]):
+        raise HTTPException(status_code=403, detail="Only the super admin can add administrator accounts.")
     ensure_firebase_admin()
     email = payload.email.strip()
     try:
@@ -636,28 +609,11 @@ def create_admin(payload: ManagedAdminInput, user=Depends(admin_user), db=Depend
     db.commit()
     return {"uid": account.uid, "email": account.email or email, "full_name": account.display_name or "", "role": "admin"}
 
-@app.post("/admin/master-admins", status_code=201)
-def create_master_admin(payload: ManagedAdminInput, user=Depends(admin_user), db=Depends(database)):
-    """Only master and super admins may appoint a master admin."""
-    if not can_manage_admins(user["uid"], db):
-        raise HTTPException(status_code=403, detail="Only master or super admins can add a master administrator.")
-    result = create_admin(payload, user, db)
-    uid = result["uid"]
-    if is_super_admin(uid):
-        raise HTTPException(status_code=409, detail="The super admin is already protected and cannot be changed.")
-    db.execute(
-        "INSERT INTO master_admins (uid, email, created_by, created_at) VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(uid) DO UPDATE SET email=excluded.email",
-        (uid, result["email"], user["uid"], timestamp()),
-    )
-    db.commit()
-    return {**result, "role": "master_admin"}
-
 @app.post("/admin/users/{uid}/password")
 def reset_user_password(uid: str, payload: PasswordResetInput, user=Depends(admin_user), db=Depends(database)):
     if is_admin(uid, db) and uid != user["uid"]:
-        if is_super_admin(uid) or not can_manage_admins(user["uid"], db):
-            raise HTTPException(status_code=403, detail="Only a master admin can reset another non-super admin's password.")
+        if not is_super_admin(user["uid"]):
+            raise HTTPException(status_code=403, detail="Only the super admin can reset another administrator's password.")
     ensure_firebase_admin()
     try:
         firebase_auth.update_user(uid, password=payload.password)
@@ -670,8 +626,8 @@ def reset_user_password(uid: str, payload: PasswordResetInput, user=Depends(admi
 def update_managed_profile(uid: str, payload: ManagedProfileInput, user=Depends(admin_user), db=Depends(database)):
     if is_super_admin(uid):
         raise HTTPException(status_code=403, detail="The super admin profile cannot be edited.")
-    if is_admin(uid, db) and not can_manage_admins(user["uid"], db):
-        raise HTTPException(status_code=403, detail="Master administrator access required.")
+    if is_admin(uid, db) and not is_super_admin(user["uid"]):
+        raise HTTPException(status_code=403, detail="Only the super admin can edit administrator profiles.")
     db.execute(
         "UPDATE profiles SET full_name=?, student_id=?, department=?, course=?, year=?, phone=? WHERE firebase_uid=?",
         (payload.full_name, payload.student_id, payload.department, payload.course, payload.year, payload.phone, uid),
@@ -686,19 +642,16 @@ def update_managed_profile(uid: str, payload: ManagedProfileInput, user=Depends(
 def remove_admin(uid: str, user=Depends(admin_user), db=Depends(database)):
     if is_super_admin(uid):
         raise HTTPException(status_code=403, detail="The super admin account cannot be deleted.")
-    if is_master_admin(uid, db):
-        raise HTTPException(status_code=403, detail="Master administrator accounts cannot be deleted.")
     if not is_admin(uid, db):
         raise HTTPException(status_code=404, detail="Administrator account not found")
-    if not can_manage_admins(user["uid"], db):
-        raise HTTPException(status_code=403, detail="Master administrator access required.")
+    if not is_super_admin(user["uid"]):
+        raise HTTPException(status_code=403, detail="Only the super admin can remove administrator accounts.")
     ensure_firebase_admin()
     try:
         firebase_auth.delete_user(uid)
     except Exception as exc:
         if exc.__class__.__name__ != "UserNotFoundError":
             raise HTTPException(status_code=400, detail=f"Could not remove administrator account: {exc}") from exc
-    db.execute("DELETE FROM master_admins WHERE uid = ?", (uid,))
     db.execute("DELETE FROM managed_admins WHERE uid = ?", (uid,))
     for table in ("profiles", "reminders", "tickets", "chat_history", "auth_handoffs"):
         column = "firebase_uid" if table == "profiles" else "uid" if table == "auth_handoffs" else "user_id"

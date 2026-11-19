@@ -31,7 +31,7 @@ const items = [
 export function AdminSidebar() {
   const [user, setUser] = useState(adminAuth.currentUser);
   const [adminName, setAdminName] = useState(adminAuth.currentUser?.displayName || "Administrator");
-  const [adminRole, setAdminRole] = useState<"admin" | "master_admin" | "super_admin">("admin");
+  const [adminRole, setAdminRole] = useState<"admin" | "super_admin">("admin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -61,7 +61,7 @@ export function AdminSidebar() {
             setAdminName(profile.full_name || current.displayName || "Administrator"),
           )
           .catch(() => {});
-        void api<{ role: "admin" | "master_admin" | "super_admin" }>("/admin/access")
+        void api<{ role: "admin" | "super_admin" }>("/admin/access")
           .then(({ role }) => setAdminRole(role))
           .catch(() => setAdminRole("admin"));
       } else {
@@ -153,9 +153,7 @@ export function AdminSidebar() {
               {user
                 ? adminRole === "super_admin"
                   ? "Super admin access"
-                  : adminRole === "master_admin"
-                    ? "Master admin access"
-                    : "Admin access"
+                  : "Admin access"
                 : "Administrator"}
             </div>
           </div>
